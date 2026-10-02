@@ -1651,10 +1651,19 @@ void
 dwl_ipc_manager_get_output(struct wl_client *client, struct wl_resource *resource, uint32_t id, struct wl_resource *output)
 {
 	DwlIpcOutput *ipc_output;
-	Monitor *monitor = wlr_output_from_resource(output)->data;
-	struct wl_resource *output_resource = wl_resource_create(client, &zdwl_ipc_output_v2_interface, wl_resource_get_version(resource), id);
-	if (!output_resource)
+	struct wlr_output *wlr_output = wlr_output_from_resource(output);
+	Monitor *monitor;
+	struct wl_resource *output_resource;
+
+	/* The protocol defines no error enum for this, so just ignore a
+	 * wl_output we do not manage rather than inventing an error code. */
+	if (!wlr_output || !(monitor = wlr_output->data))
 		return;
+	output_resource = wl_resource_create(client, &zdwl_ipc_output_v2_interface, wl_resource_get_version(resource), id);
+	if (!output_resource) {
+		wl_client_post_no_memory(client);
+		return;
+	}
 
 	ipc_output = ecalloc(1, sizeof(*ipc_output));
 	ipc_output->resource = output_resource;
@@ -1674,6 +1683,8 @@ static void
 dwl_ipc_output_destroy(struct wl_resource *resource)
 {
 	DwlIpcOutput *ipc_output = wl_resource_get_user_data(resource);
+	if (!ipc_output)
+		return;
 	wl_list_remove(&ipc_output->link);
 	free(ipc_output);
 }
@@ -1763,7 +1774,7 @@ dwl_ipc_output_set_client_tags(struct wl_client *client, struct wl_resource *res
 	selected_client->tags = newtags;
 	if (selmon == monitor)
 		focusclient(focustop(monitor), NULL, 1);
-	arrange(selmon);
+	arrange(monitor);
 	printstatus();
 }
 
@@ -2805,24 +2816,24 @@ setcursorshape(struct wl_listener *listener, void *data)
 void
 setfloating(Client *c, int floating)
 {
-	Client *sc;
+	Client *sc, *tmp;
 	c->isfloating = floating;
-	/* If in floating layout do not change the client's layer */
-	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
-		return;
-	/* Check if unfloated client was part of any scratchpad slot
-	 * and remove it from that slot if so */
+	/* Check if unfloated client was part of any scratchpad slot and remove it
+	 * from that slot if so. This runs before the early return below, otherwise
+	 * a client that is not yet mapped would stay dangling in its slot. */
 	if (!floating) {
 		for (int i = 0; i < SCRATCHPAD_COUNT; i++) {
-			wl_list_for_each(sc, &scratchpad_clients[i], link_temp) {
+			wl_list_for_each_safe(sc, tmp, &scratchpad_clients[i], link_temp) {
 				if (sc == c) {
 					wl_list_remove(&c->link_temp);
-					goto scratchpad_float_done;
+					break;
 				}
 			}
 		}
-scratchpad_float_done:;
 	}
+	/* If in floating layout do not change the client's layer */
+	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
+		return;
 	arrange(c->mon);
 	printstatus();
 }
@@ -3054,7 +3065,6 @@ setup(void)
 	 */
 	wl_list_init(&clients);
 	wl_list_init(&fstack);
-	wl_list_init(&fstack);
 	for (int j = 0; j < SCRATCHPAD_COUNT; j++) {
 		wl_list_init(&scratchpad_clients[j]);
 		scratchpad_visible[j] = 1;
@@ -3164,8 +3174,6 @@ setup(void)
 	input_method_manager = wlr_input_method_manager_v2_create(dpy);
 	text_input_manager = wlr_text_input_manager_v3_create(dpy);
 	input_method_relay = input_method_relay_create();
-
-	wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 2, NULL, dwl_ipc_manager_bind);
 
 	wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 2, NULL, dwl_ipc_manager_bind);
 
@@ -3320,6 +3328,8 @@ tile(Monitor *m)
 void
 togglebar(const Arg *arg) {
 	DwlIpcOutput *ipc_output;
+	if (!selmon)
+		return;
 	wl_list_for_each(ipc_output, &selmon->dwl_ipc_outputs, link)
 		zdwl_ipc_output_v2_send_toggle_visibility(ipc_output->resource);
 }
@@ -3370,7 +3380,7 @@ dumpwindowsrequest(int signum, void *data)
 
 	snprintf(path, sizeof path, "%s/dwl-windows", rt ? rt : "/tmp");
 	if (!(f = fopen(path, "w")))
-		return 1;
+		return 0;
 	wl_list_for_each(c, &clients, link) {
 		if (!c->mon || !VISIBLEON(c, c->mon))
 			continue;
@@ -3379,7 +3389,7 @@ dumpwindowsrequest(int signum, void *data)
 		                c->geom.x, c->geom.y, c->geom.width, c->geom.height);
 	}
 	fclose(f);
-	return 1;
+	return 0;
 }
 
 void

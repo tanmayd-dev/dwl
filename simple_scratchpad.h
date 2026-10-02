@@ -39,24 +39,31 @@ addscratchpad(const Arg *arg)
 void
 togglescratchpad(const Arg *arg)
 {
-	Client *c;
+	Client *c, *last = NULL;
 	Monitor *m = selmon;
 
+	if (!m)
+		return;
 	scratchpad_visible[scratchpad_sel] = !scratchpad_visible[scratchpad_sel];
 	if (scratchpad_visible[scratchpad_sel]) {
+		/* Show every client in the slot on the current tagset, then focus
+		 * the most recently added one once, after the loop. */
 		wl_list_for_each(c, &scratchpad_clients[scratchpad_sel], link_temp) {
 			c->mon = m;
 			c->tags = m->tagset[m->seltags];
-			arrange(m);
-			focusclient(c, NULL, 1);
+			last = c;
 		}
+		arrange(m);
+		/* Empty slot: keep current focus instead of clearing it */
+		if (last)
+			focusclient(last, NULL, 1);
 	} else {
-		wl_list_for_each(c, &scratchpad_clients[scratchpad_sel], link_temp) {
+		wl_list_for_each(c, &scratchpad_clients[scratchpad_sel], link_temp)
 			c->tags = 0;
-			focusclient(focustop(m), NULL, 1);
-			arrange(m);
-		}
+		arrange(m);
+		focusclient(focustop(m), NULL, 1);
 	}
+	printstatus();
 }
 
 void

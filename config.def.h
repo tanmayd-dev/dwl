@@ -149,9 +149,13 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_period,      focusmon,         {.i = WLR_DIRECTION_RIGHT} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_comma,       tagmon,           {.i = WLR_DIRECTION_LEFT} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_period,      tagmon,           {.i = WLR_DIRECTION_RIGHT} },
-	{ MODKEY|WLR_MODIFIER_LOGO,  XKB_KEY_1,           setscratchpad,    {.i = 0} },
-	{ MODKEY|WLR_MODIFIER_LOGO,  XKB_KEY_2,           setscratchpad,    {.i = 1} },
-	{ MODKEY|WLR_MODIFIER_LOGO,  XKB_KEY_3,           setscratchpad,    {.i = 2} },
+	/* Scratchpad slot selection. Fixed ALT+LOGO (not MODKEY-based): with
+	 * MODKEY|LOGO a MODKEY=LOGO user gets LOGO|LOGO, and with MODKEY|ALT
+	 * a MODKEY=ALT user gets ALT|ALT, so neither is usable as a default.
+	 * ALT+LOGO collides with none of the TAGKEYS combos either way. */
+	{ WLR_MODIFIER_ALT|WLR_MODIFIER_LOGO,  XKB_KEY_1,           setscratchpad,    {.i = 0} },
+	{ WLR_MODIFIER_ALT|WLR_MODIFIER_LOGO,  XKB_KEY_2,           setscratchpad,    {.i = 1} },
+	{ WLR_MODIFIER_ALT|WLR_MODIFIER_LOGO,  XKB_KEY_3,           setscratchpad,    {.i = 2} },
 	TAGKEYS(                     XKB_KEY_1,           0),
 	TAGKEYS(                     XKB_KEY_2,           1),
 	TAGKEYS(                     XKB_KEY_3,           2),
