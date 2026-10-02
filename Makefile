@@ -21,7 +21,8 @@ dwl: dwl.c client.h config.h ime.h util.h config.mk cursor-shape-v1-protocol.h \
 	ext-image-copy-capture-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
-	dwl-ipc-unstable-v2-protocol.h dwl-ipc-unstable-v2-protocol.c
+	dwl-ipc-unstable-v2-protocol.h dwl-ipc-unstable-v2-protocol.c \
+	simple_scratchpad.h
 	$(CC) dwl.c dwl-ipc-unstable-v2-protocol.c $(DWLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
 
 # wayland-scanner is a tool which generates C headers and rigging for Wayland

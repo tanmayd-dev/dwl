@@ -4,7 +4,7 @@ VERSION  = `git describe --tags --dirty 2>/dev/null || echo $(_VERSION)`
 PKG_CONFIG = pkg-config
 
 # paths
-PREFIX = /usr/local
+PREFIX = /home/tanmay/.local
 MANDIR = $(PREFIX)/share/man
 DATADIR = $(PREFIX)/share
 

@@ -163,6 +163,7 @@ typedef struct {
 	unsigned int bw;
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen;
+	struct wl_list link_temp;
 } Client;
 
 typedef struct {
@@ -272,6 +273,7 @@ typedef struct {
 } SessionLock;
 
 /* function declarations */
+static void addscratchpad(const Arg *arg);
 static void applybounds(Client *c, struct wlr_box *bbox);
 static void applygeom(Client *c);
 static void applyrules(Client *c);
@@ -361,6 +363,7 @@ static void printstatus(void);
 static void powermgrsetmode(struct wl_listener *listener, void *data);
 static void quit(const Arg *arg);
 static void rendermon(struct wl_listener *listener, void *data);
+static void removescratchpad(const Arg *arg);
 static void requestdecorationmode(struct wl_listener *listener, void *data);
 static void requeststartdrag(struct wl_listener *listener, void *data);
 static void requestmonstate(struct wl_listener *listener, void *data);
@@ -375,6 +378,7 @@ static void setmfact(const Arg *arg);
 static void setmon(Client *c, Monitor *m, uint32_t newtags);
 static void setmonoff(struct wlr_output *wlr_output, int off);
 static void setpsel(struct wl_listener *listener, void *data);
+static void setscratchpad(const Arg *arg);
 static void setsel(struct wl_listener *listener, void *data);
 static void setup(void);
 static struct wlr_scene_node *snapshot(struct wlr_scene_node *node,
@@ -387,6 +391,9 @@ static void tile(Monitor *m);
 static void togglebar(const Arg *arg);
 static void togglefloating(const Arg *arg);
 static void togglefullscreen(const Arg *arg);
+static void togglescratchpad(const Arg *arg);
+static void togglefocusfloat(const Arg *arg);
+static int dumpwindowsrequest(int signum, void *data);
 static void toggletag(const Arg *arg);
 static void toggleview(const Arg *arg);
 static void transactionapply(void);
@@ -531,6 +538,8 @@ static struct wlr_xwayland *xwayland;
 #include "client.h"
 
 #include "ime.h"
+
+#include "simple_scratchpad.h"
 
 /* function implementations */
 void
@@ -1528,10 +1537,21 @@ void
 destroynotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the xdg_toplevel is destroyed. */
-	Client *c = wl_container_of(listener, c, destroy);
+	Client *sc, *c = wl_container_of(listener, c, destroy);
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
+	/* Check if destroyed client was part of any scratchpad slot
+	 * and clean it from the list if so. */
+	for (int i = 0; i < SCRATCHPAD_COUNT; i++) {
+		wl_list_for_each(sc, &scratchpad_clients[i], link_temp) {
+			if (sc == c) {
+				wl_list_remove(&c->link_temp);
+				goto scratchpad_destroy_done;
+			}
+		}
+	}
+scratchpad_destroy_done:;
 #ifdef XWAYLAND
 	if (c->type != XDGShell) {
 		wl_list_remove(&c->activate.link);
@@ -1799,7 +1819,6 @@ dwl_ipc_output_release(struct wl_client *client, struct wl_resource *resource)
 }
 
 void
-focusclient(Client *c, int lift)
 focusclient(Client *c, LayerSurface *l, int lift)
 {
 	struct wlr_surface *surface, *old = seat->keyboard_state.focused_surface;
@@ -2786,10 +2805,24 @@ setcursorshape(struct wl_listener *listener, void *data)
 void
 setfloating(Client *c, int floating)
 {
+	Client *sc;
 	c->isfloating = floating;
 	/* If in floating layout do not change the client's layer */
 	if (!c->mon || !client_surface(c)->mapped || !c->mon->lt[c->mon->sellt]->arrange)
 		return;
+	/* Check if unfloated client was part of any scratchpad slot
+	 * and remove it from that slot if so */
+	if (!floating) {
+		for (int i = 0; i < SCRATCHPAD_COUNT; i++) {
+			wl_list_for_each(sc, &scratchpad_clients[i], link_temp) {
+				if (sc == c) {
+					wl_list_remove(&c->link_temp);
+					goto scratchpad_float_done;
+				}
+			}
+		}
+scratchpad_float_done:;
+	}
 	arrange(c->mon);
 	printstatus();
 }
@@ -2921,6 +2954,7 @@ setup(void)
 	 * clients from the Unix socket, managing Wayland globals, and so on. */
 	dpy = wl_display_create();
 	event_loop = wl_display_get_event_loop(dpy);
+	wl_event_loop_add_signal(event_loop, SIGUSR1, dumpwindowsrequest, NULL);
 
 	/* The backend is a wlroots feature which abstracts the underlying input and
 	 * output hardware. The autocreate option will choose the most suitable
@@ -3020,6 +3054,11 @@ setup(void)
 	 */
 	wl_list_init(&clients);
 	wl_list_init(&fstack);
+	wl_list_init(&fstack);
+	for (int j = 0; j < SCRATCHPAD_COUNT; j++) {
+		wl_list_init(&scratchpad_clients[j]);
+		scratchpad_visible[j] = 1;
+	}
 
 	transaction_timer = wl_event_loop_add_timer(event_loop, transactiontimeout, NULL);
 	wl_array_init(&ghosts);
@@ -3300,6 +3339,47 @@ togglefullscreen(const Arg *arg)
 	Client *sel = focustop(selmon);
 	if (sel)
 		setfullscreen(sel, !sel->isfullscreen);
+}
+
+void
+togglefocusfloat(const Arg *arg)
+{
+	Client *c, *sel = focustop(selmon);
+	if (!sel)
+		return;
+	wl_list_for_each(c, &clients, link) {
+		if (c == sel || c->mon != selmon)
+			continue;
+		if (!(c->tags & selmon->tagset[selmon->seltags]))
+			continue;
+		if (c->isfloating != sel->isfloating) {
+			focusclient(c, NULL, 1);
+			printstatus();
+			return;
+		}
+	}
+}
+
+static int
+dumpwindowsrequest(int signum, void *data)
+{
+	FILE *f;
+	Client *c;
+	char path[PATH_MAX];
+	const char *rt = getenv("XDG_RUNTIME_DIR");
+
+	snprintf(path, sizeof path, "%s/dwl-windows", rt ? rt : "/tmp");
+	if (!(f = fopen(path, "w")))
+		return 1;
+	wl_list_for_each(c, &clients, link) {
+		if (!c->mon || !VISIBLEON(c, c->mon))
+			continue;
+		fprintf(f, "%s | %s | %d,%d %dx%d\n",
+		                client_get_appid(c), client_get_title(c),
+		                c->geom.x, c->geom.y, c->geom.width, c->geom.height);
+	}
+	fclose(f);
+	return 1;
 }
 
 void
