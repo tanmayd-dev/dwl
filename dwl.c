@@ -47,6 +47,7 @@
 #include <wlr/types/wlr_output_swapchain_manager.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_pointer_gestures_v1.h>
 #include <wlr/types/wlr_presentation_time.h>
 #include <wlr/types/wlr_primary_selection.h>
 #include <wlr/types/wlr_primary_selection_v1.h>
@@ -85,6 +86,7 @@
 #define TAGMASK                 ((1u << TAGCOUNT) - 1)
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
+#define SWIPE_TAG_THRESHOLD     150 /* px of 3-finger swipe needed to switch tags */
 
 /* enums */
 enum { CurNormal, CurPressed, CurMove, CurResize }; /* cursor */
@@ -261,6 +263,7 @@ typedef struct {
 	uint32_t tags;
 	int isfloating;
 	int monitor;
+	int scratchpad;
 } Rule;
 
 typedef struct {
@@ -334,9 +337,13 @@ static void focusclient(Client *c, LayerSurface *l, int lift);
 static void focusmon(const Arg *arg);
 static void focusstack(const Arg *arg);
 static Client *focustop(Monitor *m);
+static void resizefloat(const Arg *arg);
+static void movestack(const Arg *arg);
 static void fullscreennotify(struct wl_listener *listener, void *data);
 static void gpureset(struct wl_listener *listener, void *data);
 static void handlesig(int signo);
+static void holdbegin(struct wl_listener *listener, void *data);
+static void holdend(struct wl_listener *listener, void *data);
 static void incnmaster(const Arg *arg);
 static void inputdevice(struct wl_listener *listener, void *data);
 static const Key *keybinding(uint32_t mods, xkb_keysym_t sym);
@@ -357,6 +364,9 @@ static void moveresize(const Arg *arg);
 static void outputmgrapply(struct wl_listener *listener, void *data);
 static void outputmgrapplyortest(struct wlr_output_configuration_v1 *config, int test);
 static void outputmgrtest(struct wl_listener *listener, void *data);
+static void pinchbegin(struct wl_listener *listener, void *data);
+static void pinchend(struct wl_listener *listener, void *data);
+static void pinchupdate(struct wl_listener *listener, void *data);
 static void pointerfocus(Client *c, LayerSurface* l, struct wlr_surface *surface,
 		double sx, double sy, uint32_t time);
 static void printstatus(void);
@@ -385,6 +395,9 @@ static struct wlr_scene_node *snapshot(struct wlr_scene_node *node,
 		struct wlr_scene_tree *parent, void *data);
 static void spawn(const Arg *arg);
 static void startdrag(struct wl_listener *listener, void *data);
+static void swipebegin(struct wl_listener *listener, void *data);
+static void swipeend(struct wl_listener *listener, void *data);
+static void swipeupdate(struct wl_listener *listener, void *data);
 static void tag(const Arg *arg);
 static void tagmon(const Arg *arg);
 static void tile(Monitor *m);
@@ -449,6 +462,7 @@ static struct wlr_ext_foreign_toplevel_list_v1 *foreign_toplevel_list;
 static struct wlr_ext_foreign_toplevel_image_capture_source_manager_v1 *ext_foreign_toplevel_image_capture_source_manager_v1;
 
 static struct wlr_pointer_constraints_v1 *pointer_constraints;
+static struct wlr_pointer_gestures_v1 *pointer_gestures;
 static struct wlr_relative_pointer_manager_v1 *relative_pointer_mgr;
 static struct wlr_pointer_constraint_v1 *active_constraint;
 
@@ -465,6 +479,8 @@ static KeyboardGroup *kb_group;
 static unsigned int cursor_mode;
 static Client *grabc;
 static int grabcx, grabcy; /* client-relative */
+static int swipe3_active; /* tracking a 3-finger tag-switch swipe */
+static double swipe3_dx; /* accumulated horizontal swipe distance */
 
 static struct wlr_output_layout *output_layout;
 static struct wlr_box sgeom;
@@ -487,6 +503,14 @@ static struct wl_listener cursor_button = {.notify = buttonpress};
 static struct wl_listener cursor_frame = {.notify = cursorframe};
 static struct wl_listener cursor_motion = {.notify = motionrelative};
 static struct wl_listener cursor_motion_absolute = {.notify = motionabsolute};
+static struct wl_listener cursor_swipe_begin = {.notify = swipebegin};
+static struct wl_listener cursor_swipe_update = {.notify = swipeupdate};
+static struct wl_listener cursor_swipe_end = {.notify = swipeend};
+static struct wl_listener cursor_pinch_begin = {.notify = pinchbegin};
+static struct wl_listener cursor_pinch_update = {.notify = pinchupdate};
+static struct wl_listener cursor_pinch_end = {.notify = pinchend};
+static struct wl_listener cursor_hold_begin = {.notify = holdbegin};
+static struct wl_listener cursor_hold_end = {.notify = holdend};
 static struct wl_listener gpu_reset = {.notify = gpureset};
 static struct wl_listener layout_change = {.notify = updatemons};
 static struct wl_listener new_idle_inhibitor = {.notify = createidleinhibitor};
@@ -614,6 +638,7 @@ applyrules(Client *c)
 	const char *appid, *title;
 	uint32_t newtags = 0;
 	int i;
+	int scratchpad = 0;
 	const Rule *r;
 	Monitor *mon = selmon, *m;
 
@@ -625,6 +650,8 @@ applyrules(Client *c)
 				&& (!r->id || strstr(appid, r->id))) {
 			c->isfloating = r->isfloating;
 			newtags |= r->tags;
+			if (r->scratchpad)
+				scratchpad = r->scratchpad;
 			i = 0;
 			wl_list_for_each(m, &mons, link) {
 				if (r->monitor == i++)
@@ -635,6 +662,30 @@ applyrules(Client *c)
 
 	c->isfloating |= client_is_float_type(c);
 	setmon(c, mon, newtags);
+	if (scratchpad > 0) {
+		int idx = scratchpad - 1;
+		Client *sc;
+		int found = 0;
+		if (idx < 0)
+			idx = 0;
+		else if (idx >= SCRATCHPAD_COUNT)
+			idx = SCRATCHPAD_COUNT - 1;
+		wl_list_for_each(sc, &scratchpad_clients[idx], link_temp) {
+			if (sc == c) {
+				found = 1;
+				break;
+			}
+		}
+		if (!found) {
+			if (!c->isfloating)
+				setfloating(c, 1);
+			wl_list_insert(&scratchpad_clients[idx], &c->link_temp);
+		}
+		c->tags = 0;
+		scratchpad_visible[idx] = 0;
+		if (c->mon)
+			arrange(c->mon);
+	}
 }
 
 void
@@ -752,6 +803,106 @@ axisnotify(struct wl_listener *listener, void *data)
 	wlr_seat_pointer_notify_axis(seat,
 			event->time_msec, event->orientation, event->delta,
 			event->delta_discrete, event->source, event->relative_direction);
+}
+
+void
+swipebegin(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_swipe_begin_event *event = data;
+	if (!locked && event->fingers == 3) {
+		/* 3-finger swipe is consumed for tag switching */
+		swipe3_active = 1;
+		swipe3_dx = 0;
+		return;
+	}
+	wlr_pointer_gestures_v1_send_swipe_begin(pointer_gestures,
+			seat, event->time_msec, event->fingers);
+}
+
+void
+swipeupdate(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_swipe_update_event *event = data;
+	if (swipe3_active) {
+		Arg a;
+		int i, cur;
+
+		swipe3_dx += event->dx;
+		if (swipe3_dx > SWIPE_TAG_THRESHOLD)
+			i = -1; /* left-to-right: move to tag on the left */
+		else if (swipe3_dx < -SWIPE_TAG_THRESHOLD)
+			i = +1; /* right-to-left: move to tag on the right */
+		else
+			return;
+		swipe3_dx = 0;
+
+		/* Only switch when exactly one tag is selected */
+		if (!selmon)
+			return;
+		cur = selmon->tagset[selmon->seltags] & TAGMASK;
+		if (!cur || (cur & (cur - 1)))
+			return;
+		cur = __builtin_ffs(cur) - 1;
+		a.ui = 1u << (cur + i + TAGCOUNT) % TAGCOUNT;
+		view(&a);
+		return;
+	}
+	wlr_pointer_gestures_v1_send_swipe_update(pointer_gestures,
+			seat, event->time_msec, event->dx, event->dy);
+}
+
+void
+swipeend(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_swipe_end_event *event = data;
+	if (swipe3_active) {
+		swipe3_active = 0;
+		swipe3_dx = 0;
+		return;
+	}
+	wlr_pointer_gestures_v1_send_swipe_end(pointer_gestures,
+			seat, event->time_msec, event->cancelled);
+}
+
+void
+pinchbegin(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_begin_event *event = data;
+	wlr_pointer_gestures_v1_send_pinch_begin(pointer_gestures,
+			seat, event->time_msec, event->fingers);
+}
+
+void
+pinchupdate(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_update_event *event = data;
+	wlr_pointer_gestures_v1_send_pinch_update(pointer_gestures,
+			seat, event->time_msec, event->dx, event->dy,
+			event->scale, event->rotation);
+}
+
+void
+pinchend(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_pinch_end_event *event = data;
+	wlr_pointer_gestures_v1_send_pinch_end(pointer_gestures,
+			seat, event->time_msec, event->cancelled);
+}
+
+void
+holdbegin(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_hold_begin_event *event = data;
+	wlr_pointer_gestures_v1_send_hold_begin(pointer_gestures,
+			seat, event->time_msec, event->fingers);
+}
+
+void
+holdend(struct wl_listener *listener, void *data)
+{
+	struct wlr_pointer_hold_end_event *event = data;
+	wlr_pointer_gestures_v1_send_hold_end(pointer_gestures,
+			seat, event->time_msec, event->cancelled);
 }
 
 void
@@ -937,6 +1088,14 @@ cleanuplisteners(void)
 	wl_list_remove(&cursor_frame.link);
 	wl_list_remove(&cursor_motion.link);
 	wl_list_remove(&cursor_motion_absolute.link);
+	wl_list_remove(&cursor_swipe_begin.link);
+	wl_list_remove(&cursor_swipe_update.link);
+	wl_list_remove(&cursor_swipe_end.link);
+	wl_list_remove(&cursor_pinch_begin.link);
+	wl_list_remove(&cursor_pinch_update.link);
+	wl_list_remove(&cursor_pinch_end.link);
+	wl_list_remove(&cursor_hold_begin.link);
+	wl_list_remove(&cursor_hold_end.link);
 	wl_list_remove(&gpu_reset.link);
 	wl_list_remove(&new_idle_inhibitor.link);
 	wl_list_remove(&layout_change.link);
@@ -1946,6 +2105,75 @@ focusstack(const Arg *arg)
 	focusclient(c, NULL, 1);
 }
 
+void
+resizefloat(const Arg *arg)
+{
+	Client *c = focustop(selmon);
+	struct wlr_box geo;
+	int step = 10;
+
+	if (!c || !c->isfloating || c->isfullscreen)
+		return;
+
+	geo = c->geom;
+
+	switch (arg->i) {
+	case 0: /* left - decrease width */
+		geo.width -= step;
+		break;
+	case 1: /* right - increase width */
+		geo.width += step;
+		break;
+	case 2: /* up - reduce height */
+		geo.height -= step;
+		break;
+	case 3: /* down - increase height */
+		geo.height += step;
+		break;
+	}
+
+	resize(c, geo, 0);
+}
+
+void
+movestack(const Arg *arg)
+{
+	Client *c = focustop(selmon);
+	Client *target;
+
+	if (!c || c->isfullscreen)
+		return;
+
+	if (arg->i > 0) {
+		/* Move down the stack (towards the end of the list) */
+		target = NULL;
+		wl_list_for_each(target, &c->link, link) {
+			if (&target->link == &clients)
+				continue;
+			if (VISIBLEON(target, selmon))
+				break;
+		}
+		if (target && target != c && &target->link != &clients) {
+			wl_list_remove(&c->link);
+			wl_list_insert(&target->link, &c->link);
+		}
+	} else {
+		/* Move up the stack (towards the beginning of the list) */
+		target = NULL;
+		wl_list_for_each_reverse(target, &c->link, link) {
+			if (&target->link == &clients)
+				continue;
+			if (VISIBLEON(target, selmon))
+				break;
+		}
+		if (target && target != c && &target->link != &clients) {
+			wl_list_remove(&c->link);
+			wl_list_insert(target->link.next, &c->link);
+		}
+	}
+	arrange(selmon);
+}
+
 /* We probably should change the name of this: it sounds like it
  * will focus the topmost client of this mon, when actually will
  * only return that client */
@@ -2752,6 +2980,14 @@ run(char *startup_cmd)
 		close(piperw[0]);
 	}
 
+	/* Spawn the default scratchpad terminal (slot 0: mathypad).
+	 * Its rule assigns it to scratchpad slot 0, hidden, so the
+	 * first togglescratchpad shows a ready-to-use mathypad. */
+	{
+		const Arg arg = {.v = scratchpadcmd};
+		spawn(&arg);
+	}
+
 	/* Mark stdout as non-blocking to avoid the startup script
 	 * causing dwl to freeze when a user neither closes stdin
 	 * nor consumes standard input in his startup script */
@@ -3106,6 +3342,7 @@ setup(void)
 	wl_signal_add(&xdg_decoration_mgr->events.new_toplevel_decoration, &new_xdg_decoration);
 
 	pointer_constraints = wlr_pointer_constraints_v1_create(dpy);
+	pointer_gestures = wlr_pointer_gestures_v1_create(dpy);
 	wl_signal_add(&pointer_constraints->events.new_constraint, &new_pointer_constraint);
 
 	relative_pointer_mgr = wlr_relative_pointer_manager_v1_create(dpy);
@@ -3139,6 +3376,14 @@ setup(void)
 	wl_signal_add(&cursor->events.button, &cursor_button);
 	wl_signal_add(&cursor->events.axis, &cursor_axis);
 	wl_signal_add(&cursor->events.frame, &cursor_frame);
+	wl_signal_add(&cursor->events.swipe_begin, &cursor_swipe_begin);
+	wl_signal_add(&cursor->events.swipe_update, &cursor_swipe_update);
+	wl_signal_add(&cursor->events.swipe_end, &cursor_swipe_end);
+	wl_signal_add(&cursor->events.pinch_begin, &cursor_pinch_begin);
+	wl_signal_add(&cursor->events.pinch_update, &cursor_pinch_update);
+	wl_signal_add(&cursor->events.pinch_end, &cursor_pinch_end);
+	wl_signal_add(&cursor->events.hold_begin, &cursor_hold_begin);
+	wl_signal_add(&cursor->events.hold_end, &cursor_hold_end);
 
 	cursor_shape_mgr = wlr_cursor_shape_manager_v1_create(dpy, 1);
 	wl_signal_add(&cursor_shape_mgr->events.request_set_shape, &request_set_cursor_shape);

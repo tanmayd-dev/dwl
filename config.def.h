@@ -23,9 +23,10 @@ static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You ca
 static int log_level = WLR_ERROR;
 
 static const Rule rules[] = {
-	/* app_id             title       tags mask     isfloating   monitor */
-	{ "Gimp_EXAMPLE",     NULL,       0,            1,           -1 }, /* Start on currently visible tags floating, not tiled */
-	{ "firefox_EXAMPLE",  NULL,       1 << 8,       0,           -1 }, /* Start on ONLY tag "9" */
+	/* app_id             title       tags mask     isfloating   monitor   scratchpad (0 = none, else slot+1) */
+	{ "Gimp_EXAMPLE",     NULL,       0,            1,           -1,       0 }, /* Start on currently visible tags floating, not tiled */
+	{ "firefox_EXAMPLE",  NULL,       1 << 8,       0,           -1,       0 }, /* Start on ONLY tag "9" */
+	{ "sp-math",          NULL,       0,            1,           -1,       1 }, /* Default scratchpad slot 0: terminal running mathypad, hidden */
     /* default/example rule: can be changed but cannot be eliminated; at least one rule must exist */
 };
 
@@ -119,6 +120,10 @@ static const enum libinput_config_tap_button_map button_map = LIBINPUT_CONFIG_TA
 /* commands */
 static const char *termcmd[] = { "foot", NULL };
 static const char *menucmd[] = { "wmenu-run", NULL };
+/* Default scratchpad slot 0: terminal running mathypad.
+ * Its app_id ("sp-math") is matched by a rule above that
+ * assigns it to scratchpad slot 0, hidden. */
+static const char *scratchpadcmd[] = { "foot", "--app-id", "sp-math", "mathypad", NULL };
 
 static const Key keys[] = {
 	/* modifier                  key                  function          argument */
