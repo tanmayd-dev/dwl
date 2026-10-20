@@ -21,6 +21,7 @@ dwl: dwl.c client.h config.h ime.h util.h config.mk cursor-shape-v1-protocol.h \
 	ext-image-copy-capture-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
 	wlr-output-power-management-unstable-v1-protocol.h xdg-shell-protocol.h \
+	tablet-v2-protocol.h \
 	dwl-ipc-unstable-v2-protocol.h dwl-ipc-unstable-v2-protocol.c \
 	simple_scratchpad.h
 	$(CC) dwl.c dwl-ipc-unstable-v2-protocol.c $(DWLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
@@ -49,6 +50,9 @@ wlr-output-power-management-unstable-v1-protocol.h:
 xdg-shell-protocol.h:
 	$(WAYLAND_SCANNER) server-header \
 		$(WAYLAND_PROTOCOLS)/stable/xdg-shell/xdg-shell.xml $@
+tablet-v2-protocol.h:
+	$(WAYLAND_SCANNER) server-header \
+		$(WAYLAND_PROTOCOLS)/unstable/tablet/tablet-unstable-v2.xml $@
 dwl-ipc-unstable-v2-protocol.h:
 	$(WAYLAND_SCANNER) server-header \
 		protocols/dwl-ipc-unstable-v2.xml $@
