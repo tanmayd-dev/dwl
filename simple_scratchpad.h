@@ -16,6 +16,24 @@ static struct wl_list scratchpad_clients[SCRATCHPAD_COUNT];
 static int scratchpad_visible[SCRATCHPAD_COUNT];
 static int scratchpad_sel = 0;
 
+/* Center a scratchpad client on the monitor and size it to a fraction of the
+ * usable area, so it does not open at the terminal's small default size. */
+static void
+scratchpadplace(Client *c, Monitor *m)
+{
+	int w = (int)(m->w.width * scratchpad_width_fraction);
+	int h = (int)(m->w.height * scratchpad_height_fraction);
+
+	if (w <= 0 || h <= 0)
+		return;
+	resize(c, (struct wlr_box){
+		.x = m->w.x + (m->w.width - w) / 2,
+		.y = m->w.y + (m->w.height - h) / 2,
+		.width = w,
+		.height = h,
+	}, 0);
+}
+
 void
 addscratchpad(const Arg *arg)
 {
@@ -51,6 +69,7 @@ togglescratchpad(const Arg *arg)
 		wl_list_for_each(c, &scratchpad_clients[scratchpad_sel], link_temp) {
 			c->mon = m;
 			c->tags = m->tagset[m->seltags];
+			scratchpadplace(c, m);
 			last = c;
 		}
 		arrange(m);

@@ -3654,16 +3654,20 @@ tabletapplymap(double x, double y, struct wlr_input_device *dev)
 {
 	Client *p = NULL;
 	struct wlr_box geom = {0};
-	if (tabletmaptosurface && tablet_curr_surface) {
-		toplevel_from_wlr_surface(tablet_curr_surface, &p, NULL);
+	if (tabletmaptosurface) {
+		/* Follow keyboard focus, not the surface under the pen: a floating
+		 * window or scratchpad can sit on top of the focused client without
+		 * being focused itself. */
+		p = focused_client ? focused_client : focustop(selmon);
 		if (p) {
 			for (; client_get_parent(p); p = client_get_parent(p));
 			geom.x = p->geom.x + p->bw;
 			geom.y = p->geom.y + p->bw;
 			geom.width = p->geom.width - 2 * p->bw;
 			geom.height = p->geom.height - 2 * p->bw;
-			wlr_cursor_map_input_to_region(cursor, dev, &geom);
 		}
+		wlr_cursor_map_input_to_region(cursor, dev,
+				wlr_box_empty(&geom) ? NULL : &geom);
 	}
 	wlr_cursor_map_input_to_output(cursor, dev, selmon->wlr_output);
 }

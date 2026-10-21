@@ -16,6 +16,10 @@ static const float urgentcolor[]           = COLOR(0xff0000ff);
 static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You can also use glsl colors */
 
 #define SCRATCHPAD_COUNT 3
+/* Scratchpad size as a fraction of the monitor's usable area. The window is
+ * centered on show; set both to 1.0f for a fullscreen-sized scratchpad. */
+static const float scratchpad_width_fraction  = 0.7f;
+static const float scratchpad_height_fraction = 0.75f;
 /* tagging - TAGCOUNT must be no greater than 31 */
 #define TAGCOUNT (9)
 
