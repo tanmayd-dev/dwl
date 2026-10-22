@@ -67,18 +67,27 @@ togglescratchpad(const Arg *arg)
 		/* Show every client in the slot on the current tagset, then focus
 		 * the most recently added one once, after the loop. */
 		wl_list_for_each(c, &scratchpad_clients[scratchpad_sel], link_temp) {
-			c->mon = m;
-			c->tags = m->tagset[m->seltags];
-			scratchpadplace(c, m);
-			last = c;
+			/* If this scratchpad client is swallowed, the visible one is
+			 * its child: show the child, leave the hidden parent alone. */
+			Client *target = (c->isswallowed && c->swallowedby) ? c->swallowedby : c;
+			target->mon = m;
+			target->tags = m->tagset[m->seltags];
+			if (target == c)
+				scratchpadplace(c, m);
+			else
+				c->mon = m; /* keep the hidden parent on the same monitor */
+			last = target;
 		}
 		arrange(m);
 		/* Empty slot: keep current focus instead of clearing it */
 		if (last)
 			focusclient(last, NULL, 1);
 	} else {
-		wl_list_for_each(c, &scratchpad_clients[scratchpad_sel], link_temp)
-			c->tags = 0;
+		wl_list_for_each(c, &scratchpad_clients[scratchpad_sel], link_temp) {
+			/* Hide the visible client: the swallowed child if there is one. */
+			Client *target = (c->isswallowed && c->swallowedby) ? c->swallowedby : c;
+			target->tags = 0;
+		}
 		arrange(m);
 		focusclient(focustop(m), NULL, 1);
 	}

@@ -20,6 +20,13 @@ static const float fullscreen_bg[]         = {0.0f, 0.0f, 0.0f, 1.0f}; /* You ca
  * centered on show; set both to 1.0f for a fullscreen-sized scratchpad. */
 static const float scratchpad_width_fraction  = 0.7f;
 static const float scratchpad_height_fraction = 0.75f;
+
+/* Window swallowing */
+static const int  swallow_enabled   = 1;     /* master toggle */
+static const int  swallow_max_depth = 24;    /* max PPid-walk depth */
+static const char *swallow_allowlist[] = {   /* terminal app_ids eligible for swallowing */
+	"foot", "footclient",
+};
 /* tagging - TAGCOUNT must be no greater than 31 */
 #define TAGCOUNT (9)
 
@@ -134,6 +141,7 @@ static const Key keys[] = {
 	{ MODKEY,                    XKB_KEY_p,           spawn,            {.v = menucmd} },
 	{ MODKEY|WLR_MODIFIER_SHIFT, XKB_KEY_Return,      spawn,            {.v = termcmd} },
 	{ MODKEY,                    XKB_KEY_b,           togglebar,        {0} },
+	{ MODKEY|WLR_MODIFIER_CTRL,  XKB_KEY_x,           toggleswallow,    {0} },
 	{ MODKEY,                    XKB_KEY_j,           focusstack,       {.i = +1} },
 	{ MODKEY,                    XKB_KEY_k,           focusstack,       {.i = -1} },
 	{ MODKEY,                    XKB_KEY_i,           incnmaster,       {.i = +1} },

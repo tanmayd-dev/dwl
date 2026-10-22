@@ -85,7 +85,7 @@
 
 /* macros */
 #define CLEANMASK(mask)         (mask & ~WLR_MODIFIER_CAPS)
-#define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && ((C)->tags & (M)->tagset[(M)->seltags]))
+#define VISIBLEON(C, M)         ((M) && (C)->mon == (M) && ((C)->tags & (M)->tagset[(M)->seltags]) && !(C)->isswallowed)
 #define TAGMASK                 ((1u << TAGCOUNT) - 1)
 #define LISTEN(E, L, H)         wl_signal_add((E), ((L)->notify = (H), (L)))
 #define LISTEN_STATIC(E, H)     do { struct wl_listener *_l = ecalloc(1, sizeof(*_l)); _l->notify = (H); wl_signal_add((E), _l); } while (0)
@@ -120,7 +120,8 @@ typedef struct {
 } Button;
 
 typedef struct Monitor Monitor;
-typedef struct {
+typedef struct Client Client;
+struct Client {
 	/* Must keep this field first */
 	unsigned int type; /* XDGShell or X11* */
 
@@ -168,8 +169,12 @@ typedef struct {
 	unsigned int bw;
 	uint32_t tags;
 	int isfloating, isurgent, isfullscreen;
+	pid_t pid;               /* OS pid of this client, captured at map time */
+	Client *swallowing;      /* if I am a child: the parent I swallowed */
+	Client *swallowedby;     /* if I am a parent: the child that swallowed me */
+	int isswallowed;         /* 1 while hidden as a swallowed parent */
 	struct wl_list link_temp;
-} Client;
+};
 
 typedef struct {
 	struct wl_list link;
@@ -420,6 +425,11 @@ static void startdrag(struct wl_listener *listener, void *data);
 static void swipebegin(struct wl_listener *listener, void *data);
 static void swipeend(struct wl_listener *listener, void *data);
 static void swipeupdate(struct wl_listener *listener, void *data);
+static void swallow(Client *parent, Client *child);
+static void unswallow(Client *parent);
+static Client *swallowfindparent(pid_t cpid);
+static int swallowallowed(Client *parent);
+static void toggleswallow(const Arg *arg);
 static void tag(const Arg *arg);
 static void tagmon(const Arg *arg);
 static void tabletapplymap(double x, double y, struct wlr_input_device *dev);
@@ -598,6 +608,7 @@ static void xwaylandready(struct wl_listener *listener, void *data);
 static struct wl_listener new_xwayland_surface = {.notify = createnotifyx11};
 static struct wl_listener xwayland_ready = {.notify = xwaylandready};
 static struct wlr_xwayland *xwayland;
+static pid_t xwayland_pid; /* Xwayland server pid; excluded from PPid walks */
 #endif
 
 /* configuration, allows nested code to access above variables */
@@ -743,9 +754,10 @@ arrange(Monitor *m)
 
 	wl_list_for_each(c, &clients, link) {
 		if (c->mon == m)
-			client_set_suspended(c, !VISIBLEON(c, m)
+			client_set_suspended(c, (!VISIBLEON(c, m)
 					&& (!c->image_capture_source
-					|| wl_list_empty(&c->image_capture_source->resources)));
+					|| wl_list_empty(&c->image_capture_source->resources)))
+					|| c->isswallowed);
 	}
 
 	strncpy(m->ltsymbol, m->lt[m->sellt]->symbol, LENGTH(m->ltsymbol));
@@ -1763,6 +1775,19 @@ destroynotify(struct wl_listener *listener, void *data)
 {
 	/* Called when the xdg_toplevel is destroyed. */
 	Client *sc, *c = wl_container_of(listener, c, destroy);
+
+	/* Window swallowing: if this client was destroyed without unmapping
+	 * (e.g. an X11 client going away), restore the parent it swallowed. */
+	if (c->swallowing && c->swallowing->swallowedby == c)
+		unswallow(c->swallowing);
+
+	/* If this client is a swallowed parent that is being destroyed while its
+	 * child is alive, detach the child: it stays visible and independent. */
+	if (c->swallowedby) {
+		c->swallowedby->swallowing = NULL;
+		c->swallowedby = NULL;
+	}
+
 	wl_list_remove(&c->destroy.link);
 	wl_list_remove(&c->set_title.link);
 	wl_list_remove(&c->fullscreen.link);
@@ -1797,6 +1822,12 @@ scratchpad_destroy_done:;
 			wl_list_remove(&c->destroy_decoration.link);
 		}
 	}
+	/* The client is going away: if it is still linked into the clients list
+	 * (destroyed without unmapping), unlink it, so the list does not keep a
+	 * dangling entry pointing at the memory we are about to free. */
+	if (c->link.next)
+		wl_list_remove(&c->link);
+
 	free(c);
 }
 
@@ -1960,6 +1991,8 @@ dwl_ipc_output_printstatus_to(DwlIpcOutput *ipc_output)
 	Client *c, *focused;
 	int tagmask, state, numclients, is_focused_client, tag;
 	const char *title, *appid;
+	static char combined_appid[256];
+	static char combined_title[512];
 	focused = focustop(monitor);
 	zdwl_ipc_output_v2_send_active(ipc_output->resource, monitor == selmon);
 
@@ -1974,6 +2007,8 @@ dwl_ipc_output_printstatus_to(DwlIpcOutput *ipc_output)
 				continue;
 			if (!(c->tags & tagmask))
 				continue;
+			if (c->isswallowed)
+				continue;
 			if (c == focused)
 				is_focused_client = 1;
 			if (c->isurgent)
@@ -1985,6 +2020,20 @@ dwl_ipc_output_printstatus_to(DwlIpcOutput *ipc_output)
 	}
 	title = focused ? client_get_title(focused) : "";
 	appid = focused ? client_get_appid(focused) : "";
+
+	/* Combined identifiers: when the focused client swallowed a terminal, show
+	 * both, e.g. "foot→mpv", so the bar says what swallowed what. */
+	if (focused && focused->swallowing) {
+		const char *parent_appid = client_get_appid(focused->swallowing);
+		const char *child_appid = client_get_appid(focused);
+		const char *child_title = client_get_title(focused);
+		snprintf(combined_appid, sizeof(combined_appid), "%s→%s",
+				parent_appid, child_appid);
+		appid = combined_appid;
+		snprintf(combined_title, sizeof(combined_title), "%s→%s",
+				parent_appid, child_title);
+		title = combined_title;
+	}
 
 	zdwl_ipc_output_v2_send_layout(ipc_output->resource, monitor->lt[monitor->sellt] - layouts);
 	zdwl_ipc_output_v2_send_title(ipc_output->resource, title);
@@ -2545,6 +2594,20 @@ mapnotify(struct wl_listener *listener, void *data)
 			: wlr_scene_subsurface_tree_create(c->scene, client_surface(c));
 	c->scene->node.data = c->scene_surface->node.data = c;
 
+	/* Capture the OS pid for swallow ancestry walking */
+#ifdef XWAYLAND
+	if (client_is_x11(c))
+		c->pid = c->surface.xwayland->pid;
+	else
+#endif
+	{
+		pid_t pid = 0;
+		wl_client_get_credentials(
+			wl_resource_get_client(c->surface.xdg->resource),
+			&pid, NULL, NULL);
+		c->pid = pid;
+	}
+
 	client_get_geometry(c, &c->geom);
 
 	/* Handle unmanaged clients first so we can return prior create borders */
@@ -2600,6 +2663,15 @@ mapnotify(struct wl_listener *listener, void *data)
 	} else {
 		applyrules(c);
 	}
+
+	/* Window swallowing: if this managed client's process ancestry includes a
+	 * terminal from the allowlist, swallow that terminal. Clients with an XDG
+	 * transient parent (p != NULL) are skipped — that relationship wins. */
+	if (swallow_enabled && !p && c->pid > 0) {
+		Client *swparent = swallowfindparent(c->pid);
+		if (swparent && swallowallowed(swparent))
+			swallow(swparent, c);
+	}
 	printstatus();
 
 unset_fullscreen:
@@ -2608,6 +2680,169 @@ unset_fullscreen:
 		if (w != c && w != p && w->isfullscreen && m == w->mon && (w->tags & c->tags))
 			setfullscreen(w, 0);
 	}
+}
+
+static Client *
+swallowfindparent(pid_t cpid)
+{
+	pid_t current = cpid;
+	int depth;
+
+	for (depth = 0; depth < swallow_max_depth; depth++) {
+		Client *pc;
+		FILE *f;
+		char path[64];
+		char buf[512];
+		char *cp;
+		int ppid = 0;
+
+		snprintf(path, sizeof(path), "/proc/%d/stat", current);
+		if (!(f = fopen(path, "r")))
+			return NULL;
+		if (!fgets(buf, sizeof(buf), f)) {
+			fclose(f);
+			return NULL;
+		}
+		fclose(f);
+
+		/* The comm field is (name) and may contain spaces or parentheses,
+		 * so find the LAST ')' to skip past it reliably. */
+		if (!(cp = strrchr(buf, ')')))
+			return NULL;
+		/* After ')' comes: space, state char, space, ppid */
+		if (sscanf(cp + 2, "%*c %d", &ppid) != 1)
+			return NULL;
+
+		if (ppid <= 1)
+			return NULL; /* reached init — no match */
+
+#ifdef XWAYLAND
+		/* Never match the Xwayland server: it is the parent of every
+		 * X11 client, so matching it would swallow unrelated windows. */
+		if ((pid_t)ppid == xwayland_pid) {
+			current = ppid;
+			continue;
+		}
+#endif
+
+		wl_list_for_each(pc, &clients, link) {
+			if (pc->pid == (pid_t)ppid && !pc->isswallowed)
+				return pc;
+		}
+
+		current = ppid;
+	}
+	return NULL;
+}
+
+static int
+swallowallowed(Client *parent)
+{
+	const char *appid;
+	size_t i;
+
+	if (parent->isswallowed)
+		return 0;
+
+	appid = client_get_appid(parent);
+
+	for (i = 0; i < LENGTH(swallow_allowlist); i++) {
+		if (!strcmp(appid, swallow_allowlist[i]))
+			return 1;
+	}
+	return 0;
+}
+
+static void
+swallow(Client *parent, Client *child)
+{
+	/* 1. Record the pairing FIRST: isswallowed must be set before any
+	 *    setmon()/arrange() call, because those consult VISIBLEON. */
+	child->swallowing = parent;
+	parent->swallowedby = child;
+	parent->isswallowed = 1;
+
+	/* 2. Release the fullscreen layer if the parent was fullscreen */
+	if (parent->isfullscreen)
+		setfullscreen(parent, 0);
+
+	/* 3. The child takes over the parent's monitor and tags */
+	child->tags = parent->tags;
+	if (child->mon != parent->mon)
+		setmon(child, parent->mon, parent->tags);
+
+	/* 4. The child takes the parent's slot in the tiling order, so tile() and
+	 *    monocle() enumerate it exactly where the parent used to be. */
+	wl_list_remove(&child->link);
+	wl_list_insert(&parent->link, &child->link);
+
+	/* 5. Hide the parent. Do NOT call setmon(parent, NULL, 0): the parent must
+	 *    keep its mon and tags so unswallow() can restore it exactly. */
+	wlr_scene_node_set_enabled(&parent->scene->node, 0);
+	client_set_suspended(parent, 1);
+
+	/* 6. Drop the parent's foreign toplevel handle so it does not show up as
+	 *    a separate entry in task lists. */
+	if (parent->foreign_toplevel_handle) {
+		wlr_ext_foreign_toplevel_handle_v1_destroy(parent->foreign_toplevel_handle);
+		parent->foreign_toplevel_handle = NULL;
+	}
+
+	/* 7. Arrange and focus the child */
+	arrange(parent->mon);
+	focusclient(child, NULL, 1);
+}
+
+static void
+unswallow(Client *parent)
+{
+	Client *child = parent->swallowedby;
+	struct wlr_ext_foreign_toplevel_handle_v1_state foreign_toplevel_state;
+
+	/* 1. Clear the pairing */
+	parent->swallowedby = NULL;
+	parent->isswallowed = 0;
+	if (child)
+		child->swallowing = NULL;
+
+	/* 2. Give the parent back the slot the child took. Only do this while the
+	 * child is still linked into the clients list: a client that was already
+	 * unlinked (or never linked) has a NULL link, and inserting after it would
+	 * corrupt the list. */
+	if (child && child->link.next) {
+		wl_list_remove(&parent->link);
+		wl_list_insert(&child->link, &parent->link);
+	}
+
+	/* 3. Restore the parent's visibility */
+	wlr_scene_node_set_enabled(&parent->scene->node, VISIBLEON(parent, parent->mon));
+	client_set_suspended(parent, !VISIBLEON(parent, parent->mon));
+
+	/* 4. Recreate the foreign toplevel handle */
+	if (!parent->foreign_toplevel_handle) {
+		foreign_toplevel_state.app_id = client_get_appid(parent);
+		foreign_toplevel_state.title = client_get_title(parent);
+		parent->foreign_toplevel_handle = wlr_ext_foreign_toplevel_handle_v1_create(
+				foreign_toplevel_list, &foreign_toplevel_state);
+		if (parent->foreign_toplevel_handle)
+			parent->foreign_toplevel_handle->data = parent;
+	}
+
+	/* 5. Arrange and focus the restored parent */
+	if (parent->mon) {
+		arrange(parent->mon);
+		focusclient(parent, NULL, 1);
+	}
+}
+
+static void
+toggleswallow(const Arg *arg)
+{
+	Client *sel = focustop(selmon);
+
+	/* Break the pairing: the parent comes back, the child stays visible */
+	if (sel && sel->swallowing)
+		unswallow(sel->swallowing);
 }
 
 void
@@ -3240,6 +3475,21 @@ setmon(Client *c, Monitor *m, uint32_t newtags)
 		return;
 	c->mon = m;
 	c->prev = c->geom;
+
+	/* Window swallowing: keep the pair on the same monitor and tags.
+	 * If the child moves, the hidden parent follows it; if the parent moves
+	 * (e.g. its monitor was destroyed), the child follows the parent. */
+	if (c->swallowing) {
+		if (m) {
+			c->swallowing->mon = m;
+			if (newtags)
+				c->swallowing->tags = newtags;
+		}
+	} else if (c->swallowedby && m) {
+		c->swallowedby->mon = m;
+		if (newtags)
+			c->swallowedby->tags = newtags;
+	}
 
 	/* Scene graph sends surface leave/enter events on move and resize */
 	if (oldmon)
@@ -4094,6 +4344,19 @@ unmapnotify(struct wl_listener *listener, void *data)
 	/* Called when the surface is unmapped, and should no longer be shown. */
 	Client *c = wl_container_of(listener, c, unmap);
 	struct wlr_scene_node *ghost, **slot;
+
+	/* Window swallowing: restore the parent this client swallowed, before the
+	 * client is torn down and removed from the clients list. */
+	if (c->swallowing)
+		unswallow(c->swallowing);
+
+	/* Defensive: if this client is a swallowed parent that is unmapping,
+	 * detach the child so it keeps working on its own. */
+	if (c->swallowedby) {
+		c->swallowedby->swallowing = NULL;
+		c->swallowedby = NULL;
+	}
+
 	if (c == grabc) {
 		cursor_mode = CurNormal;
 		grabc = NULL;
@@ -4516,6 +4779,8 @@ xwaylandready(struct wl_listener *listener, void *data)
 	if ((xcursor = wlr_xcursor_manager_get_xcursor(cursor_mgr, "default", 1)))
 		wlr_xwayland_set_cursor(xwayland, wlr_xcursor_image_get_buffer(xcursor->images[0]),
 				xcursor->images[0]->hotspot_x, xcursor->images[0]->hotspot_y);
+
+	xwayland_pid = xwayland->server->pid;
 }
 #endif
 
