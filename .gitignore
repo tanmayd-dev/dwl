@@ -1,4 +1,5 @@
 dwl
+dwl-close
 *.o
 *-protocol.c
 *-protocol.h

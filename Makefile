@@ -16,7 +16,7 @@ PKGS      = wayland-server xkbcommon libinput $(XLIBS)
 DWLCFLAGS = `$(PKG_CONFIG) --cflags $(PKGS)` $(WLR_INCS) $(DWLCPPFLAGS) $(DWLDEVCFLAGS) $(CFLAGS)
 LDLIBS    = `$(PKG_CONFIG) --libs $(PKGS)` $(WLR_LIBS) -lm $(LIBS)
 
-all: dwl
+all: dwl dwl-close
 dwl: dwl.c client.h config.h ime.h util.h config.mk cursor-shape-v1-protocol.h \
 	ext-image-copy-capture-v1-protocol.h \
 	pointer-constraints-unstable-v1-protocol.h wlr-layer-shell-unstable-v1-protocol.h \
@@ -25,6 +25,13 @@ dwl: dwl.c client.h config.h ime.h util.h config.mk cursor-shape-v1-protocol.h \
 	dwl-ipc-unstable-v2-protocol.h dwl-ipc-unstable-v2-protocol.c \
 	simple_scratchpad.h
 	$(CC) dwl.c dwl-ipc-unstable-v2-protocol.c $(DWLCFLAGS) $(LDFLAGS) $(LDLIBS) -o $@
+
+# dwl-close: small client that asks dwl (via the dwl-ipc protocol) to close
+# the focused window. Used by the waybar button.
+DWLIPCCFLAGS = -I. -D_POSIX_C_SOURCE=200809L $(CPPFLAGS)
+DWLIPCLIBS   = `$(PKG_CONFIG) --cflags --libs wayland-client`
+dwl-close: dwl-close.c dwl-ipc-unstable-v2-client-protocol.h dwl-ipc-unstable-v2-protocol.c
+	$(CC) dwl-close.c dwl-ipc-unstable-v2-protocol.c $(DWLIPCCFLAGS) $(DWLIPCLIBS) $(LDFLAGS) -o $@
 
 # wayland-scanner is a tool which generates C headers and rigging for Wayland
 # protocols, which are specified in XML. wlroots requires you to rig these up
@@ -59,16 +66,19 @@ dwl-ipc-unstable-v2-protocol.h:
 dwl-ipc-unstable-v2-protocol.c:
 	$(WAYLAND_SCANNER) private-code \
         protocols/dwl-ipc-unstable-v2.xml $@
+dwl-ipc-unstable-v2-client-protocol.h:
+	$(WAYLAND_SCANNER) client-header \
+		protocols/dwl-ipc-unstable-v2.xml $@
 
 config.h:
 	cp config.def.h $@
 clean:
-	rm -f dwl *.o *-protocol.h *-protocol.c
+	rm -f dwl dwl-close *.o *-protocol.h *-protocol.c
 
 dist: clean
 	mkdir -p dwl-$(VERSION)
 	cp -R LICENSE* Makefile CHANGELOG.md README.md client.h config.def.h \
-		config.mk protocols dwl.1 dwl.c ime.h util.h dwl.desktop \
+		config.mk protocols dwl.1 dwl.c dwl-close.c ime.h util.h dwl.desktop \
 		dwl-$(VERSION)
 	tar -caf dwl-$(VERSION).tar.gz dwl-$(VERSION)
 	rm -rf dwl-$(VERSION)

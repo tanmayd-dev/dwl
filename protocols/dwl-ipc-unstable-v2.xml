@@ -19,7 +19,7 @@ I would probably just submit raphi's patchset but I don't think that would be po
       reset.
   </description>
 
-  <interface name="zdwl_ipc_manager_v2" version="2">
+  <interface name="zdwl_ipc_manager_v2" version="3">
     <description summary="manage dwl state">
       This interface is exposed as a global in wl_registry.
 
@@ -58,9 +58,17 @@ I would probably just submit raphi's patchset but I don't think that would be po
       </description>
       <arg name="name" type="string"/>
     </event>
+
+    <!-- Version 3 -->
+    <request name="close" since="3">
+      <description summary="Close the currently focused client">
+        Asks dwl to close the currently focused client on the selected output,
+        equivalent to the killclient action (default MODKEY+q).
+      </description>
+    </request>
   </interface>
 
-  <interface name="zdwl_ipc_output_v2" version="2">
+  <interface name="zdwl_ipc_output_v2" version="3">
     <description summary="control dwl output">
       Observe and control a dwl output.
 
