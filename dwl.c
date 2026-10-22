@@ -171,7 +171,8 @@ struct Client {
 	int isfloating, isurgent, isfullscreen;
 	pid_t pid;               /* OS pid of this client, captured at map time */
 	Client *swallowing;      /* if I am a child: the parent I swallowed */
-	Client *swallowedby;     /* if I am a parent: the child that swallowed me */
+	Client *swallowedby;     /* if I am a parent: the child that swallowed me
+	                          * (kept while a toggle only suspends the pair) */
 	int isswallowed;         /* 1 while hidden as a swallowed parent */
 	struct wl_list link_temp;
 };
@@ -425,6 +426,7 @@ static void startdrag(struct wl_listener *listener, void *data);
 static void swipebegin(struct wl_listener *listener, void *data);
 static void swipeend(struct wl_listener *listener, void *data);
 static void swipeupdate(struct wl_listener *listener, void *data);
+static void restoreparent(Client *parent, Client *child);
 static void swallow(Client *parent, Client *child);
 static void unswallow(Client *parent);
 static Client *swallowfindparent(pid_t cpid);
@@ -2022,8 +2024,10 @@ dwl_ipc_output_printstatus_to(DwlIpcOutput *ipc_output)
 	appid = focused ? client_get_appid(focused) : "";
 
 	/* Combined identifiers: when the focused client swallowed a terminal, show
-	 * both, e.g. "foot→mpv", so the bar says what swallowed what. */
-	if (focused && focused->swallowing) {
+	 * both, e.g. "foot→mpv", so the bar says what swallowed what. A pair that
+	 * was manually suspended with toggleswallow() shows its own title again,
+	 * since both windows are visible then. */
+	if (focused && focused->swallowing && focused->swallowing->isswallowed) {
 		const char *parent_appid = client_get_appid(focused->swallowing);
 		const char *child_appid = client_get_appid(focused);
 		const char *child_title = client_get_title(focused);
@@ -2726,7 +2730,9 @@ swallowfindparent(pid_t cpid)
 #endif
 
 		wl_list_for_each(pc, &clients, link) {
-			if (pc->pid == (pid_t)ppid && !pc->isswallowed)
+			/* Skip already paired parents: the relationship is 1:1, and a
+			 * manually suspended pair must not be stolen by a new child. */
+			if (pc->pid == (pid_t)ppid && !pc->swallowedby)
 				return pc;
 		}
 
@@ -2741,7 +2747,7 @@ swallowallowed(Client *parent)
 	const char *appid;
 	size_t i;
 
-	if (parent->isswallowed)
+	if (parent->isswallowed || parent->swallowedby)
 		return 0;
 
 	appid = client_get_appid(parent);
@@ -2794,18 +2800,14 @@ swallow(Client *parent, Client *child)
 }
 
 static void
-unswallow(Client *parent)
+restoreparent(Client *parent, Client *child)
 {
-	Client *child = parent->swallowedby;
 	struct wlr_ext_foreign_toplevel_handle_v1_state foreign_toplevel_state;
 
-	/* 1. Clear the pairing */
-	parent->swallowedby = NULL;
+	/* The parent is visible again from here on, so VISIBLEON() below is true. */
 	parent->isswallowed = 0;
-	if (child)
-		child->swallowing = NULL;
 
-	/* 2. Give the parent back the slot the child took. Only do this while the
+	/* 1. Give the parent back the slot the child took. Only do this while the
 	 * child is still linked into the clients list: a client that was already
 	 * unlinked (or never linked) has a NULL link, and inserting after it would
 	 * corrupt the list. */
@@ -2814,11 +2816,11 @@ unswallow(Client *parent)
 		wl_list_insert(&child->link, &parent->link);
 	}
 
-	/* 3. Restore the parent's visibility */
+	/* 2. Restore the parent's visibility */
 	wlr_scene_node_set_enabled(&parent->scene->node, VISIBLEON(parent, parent->mon));
 	client_set_suspended(parent, !VISIBLEON(parent, parent->mon));
 
-	/* 4. Recreate the foreign toplevel handle */
+	/* 3. Recreate the foreign toplevel handle */
 	if (!parent->foreign_toplevel_handle) {
 		foreign_toplevel_state.app_id = client_get_appid(parent);
 		foreign_toplevel_state.title = client_get_title(parent);
@@ -2828,7 +2830,7 @@ unswallow(Client *parent)
 			parent->foreign_toplevel_handle->data = parent;
 	}
 
-	/* 5. Arrange and focus the restored parent */
+	/* 4. Arrange and focus the restored parent */
 	if (parent->mon) {
 		arrange(parent->mon);
 		focusclient(parent, NULL, 1);
@@ -2836,13 +2838,50 @@ unswallow(Client *parent)
 }
 
 static void
+unswallow(Client *parent)
+{
+	Client *child = parent->swallowedby;
+
+	/* Clear the pairing: this is the teardown path, used when either side is
+	 * unmapped or destroyed. toggleswallow() deliberately does not come here:
+	 * it keeps the pairing and only suspends it, so it can be re-armed. */
+	parent->swallowedby = NULL;
+	if (child)
+		child->swallowing = NULL;
+
+	/* A manually suspended pair is already visible: nothing to restore. */
+	if (parent->isswallowed)
+		restoreparent(parent, child);
+}
+
+static void
 toggleswallow(const Arg *arg)
 {
 	Client *sel = focustop(selmon);
+	Client *parent, *child;
 
-	/* Break the pairing: the parent comes back, the child stays visible */
-	if (sel && sel->swallowing)
-		unswallow(sel->swallowing);
+	if (!sel)
+		return;
+
+	/* Find the pair this client belongs to, from either side. */
+	if (sel->swallowing) {
+		child = sel;
+		parent = sel->swallowing;
+	} else if (sel->swallowedby) {
+		parent = sel;
+		child = sel->swallowedby;
+	} else {
+		return;
+	}
+
+	if (parent->isswallowed) {
+		/* Suspend: the parent comes back, but keep the pairing so the same
+		 * keypress re-arms it. */
+		restoreparent(parent, child);
+	} else {
+		/* Re-arm a suspended pair. */
+		swallow(parent, child);
+	}
 }
 
 void
