@@ -351,6 +351,7 @@ static void destroytabletsurfacenotify(struct wl_listener *listener, void *data)
 static void destroytablettool(struct wl_listener *listener, void *data);
 static Monitor *dirtomon(enum wlr_direction dir);
 static void dwl_ipc_manager_bind(struct wl_client *client, void *data, uint32_t version, uint32_t id);
+static void dwl_ipc_manager_close(struct wl_client *client, struct wl_resource *resource);
 static void dwl_ipc_manager_destroy(struct wl_resource *resource);
 static void dwl_ipc_manager_get_output(struct wl_client *client, struct wl_resource *resource, uint32_t id, struct wl_resource *output);
 static void dwl_ipc_manager_release(struct wl_client *client, struct wl_resource *resource);
@@ -594,7 +595,7 @@ static struct wl_listener drag_icon_destroy = {.notify = destroydragicon};
 static struct wl_listener new_session_lock = {.notify = locksession};
 static struct wl_listener new_foreign_toplevel_capture_request = {.notify = capturerequest};
 
-static struct zdwl_ipc_manager_v2_interface dwl_manager_implementation = {.release = dwl_ipc_manager_release, .get_output = dwl_ipc_manager_get_output};
+static struct zdwl_ipc_manager_v2_interface dwl_manager_implementation = {.release = dwl_ipc_manager_release, .get_output = dwl_ipc_manager_get_output, .close = dwl_ipc_manager_close};
 static struct zdwl_ipc_output_v2_interface dwl_output_implementation = {.release = dwl_ipc_output_release, .set_tags = dwl_ipc_output_set_tags, .set_layout = dwl_ipc_output_set_layout, .set_client_tags = dwl_ipc_output_set_client_tags};
 
 #ifdef XWAYLAND
@@ -1966,6 +1967,15 @@ void
 dwl_ipc_manager_release(struct wl_client *client, struct wl_resource *resource)
 {
 	wl_resource_destroy(resource);
+}
+
+void
+dwl_ipc_manager_close(struct wl_client *client, struct wl_resource *resource)
+{
+	Client *focused = focustop(selmon);
+
+	if (focused)
+		client_send_close(focused);
 }
 
 static void
@@ -3361,14 +3371,6 @@ run(char *startup_cmd)
 		close(piperw[0]);
 	}
 
-	/* Spawn the default scratchpad terminal (slot 0: mathypad).
-	 * Its rule assigns it to scratchpad slot 0, hidden, so the
-	 * first togglescratchpad shows a ready-to-use mathypad. */
-	{
-		const Arg arg = {.v = scratchpadcmd};
-		spawn(&arg);
-	}
-
 	/* Mark stdout as non-blocking to avoid the startup script
 	 * causing dwl to freeze when a user neither closes stdin
 	 * nor consumes standard input in his startup script */
@@ -3822,7 +3824,7 @@ setup(void)
 	text_input_manager = wlr_text_input_manager_v3_create(dpy);
 	input_method_relay = input_method_relay_create();
 
-	wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 2, NULL, dwl_ipc_manager_bind);
+	wl_global_create(dpy, &zdwl_ipc_manager_v2_interface, 3, NULL, dwl_ipc_manager_bind);
 
 	/* Make sure XWayland clients don't connect to the parent X server,
 	 * e.g when running in the x11 backend or the wayland backend and the
