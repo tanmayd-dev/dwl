@@ -6,3 +6,7 @@ dwl-close
 .ccls-cache
 config.h
 AGENTS.md
+# makepkg artifacts (PKGBUILD builds this tree in place)
+/src/
+/pkg/
+*.pkg.tar.zst

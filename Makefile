@@ -70,24 +70,34 @@ dwl-ipc-unstable-v2-client-protocol.h:
 	$(WAYLAND_SCANNER) client-header \
 		protocols/dwl-ipc-unstable-v2.xml $@
 
+# The tracked configuration for this fork lives in config.local.h. config.h is
+# the per-machine file and stays gitignored: it is copied from the tracked
+# template only when it does not exist, so a clean checkout builds without it
+# and an existing local config is never overwritten. Deliberately no
+# prerequisite: make would otherwise regenerate (and overwrite) config.h when
+# config.local.h is newer.
 config.h:
-	cp config.def.h $@
+	cp config.local.h $@
 clean:
 	rm -f dwl dwl-close *.o *-protocol.h *-protocol.c
 
 dist: clean
 	mkdir -p dwl-$(VERSION)
-	cp -R LICENSE* Makefile CHANGELOG.md README.md client.h config.def.h \
-		config.mk protocols dwl.1 dwl.c dwl-close.c ime.h util.h dwl.desktop \
+	cp -R LICENSE* Makefile CHANGELOG.md PKGBUILD README.md client.h \
+		config.def.h config.local.h config.mk protocols dwl.1 dwl.c \
+		dwl-close.c ime.h util.h dwl.desktop scripts \
 		dwl-$(VERSION)
 	tar -caf dwl-$(VERSION).tar.gz dwl-$(VERSION)
 	rm -rf dwl-$(VERSION)
 
-install: dwl
+install: dwl dwl-close
 	mkdir -p $(DESTDIR)$(PREFIX)/bin
 	rm -f $(DESTDIR)$(PREFIX)/bin/dwl
 	cp -f dwl $(DESTDIR)$(PREFIX)/bin
 	chmod 755 $(DESTDIR)$(PREFIX)/bin/dwl
+	rm -f $(DESTDIR)$(PREFIX)/bin/dwl-close
+	cp -f dwl-close $(DESTDIR)$(PREFIX)/bin
+	chmod 755 $(DESTDIR)$(PREFIX)/bin/dwl-close
 	mkdir -p $(DESTDIR)$(MANDIR)/man1
 	cp -f dwl.1 $(DESTDIR)$(MANDIR)/man1
 	chmod 644 $(DESTDIR)$(MANDIR)/man1/dwl.1
@@ -95,5 +105,6 @@ install: dwl
 	cp -f dwl.desktop $(DESTDIR)$(DATADIR)/wayland-sessions/dwl.desktop
 	chmod 644 $(DESTDIR)$(DATADIR)/wayland-sessions/dwl.desktop
 uninstall:
-	rm -f $(DESTDIR)$(PREFIX)/bin/dwl $(DESTDIR)$(MANDIR)/man1/dwl.1 \
+	rm -f $(DESTDIR)$(PREFIX)/bin/dwl $(DESTDIR)$(PREFIX)/bin/dwl-close \
+		$(DESTDIR)$(MANDIR)/man1/dwl.1 \
 		$(DESTDIR)$(DATADIR)/wayland-sessions/dwl.desktop

@@ -13,6 +13,115 @@ philosophy. Like [dwm], dwl is:
 - One C source file configurable via `config.h`
 - Tied to as few external dependencies as possible
 
+## This fork (`local/main`)
+
+This repository is a personal fork of upstream dwl. On top of the upstream
+tree it tracks the complete configuration, a `PKGBUILD` and a build check so
+the patched compositor can be rebuilt reproducibly from a clean checkout:
+
+- `config.local.h` is the tracked configuration (current keybinds, colors,
+  terminal, scratchpad and swallowing settings). It is byte-for-byte what the
+  live session uses.
+- `config.h` remains the per-machine file and stays in `.gitignore`. `make`
+  creates it from `config.local.h` only when it is missing, so a clean checkout
+  builds and an existing `config.h` is never overwritten.
+- `PKGBUILD` builds `local/main` and installs `dwl`, `dwl-close`, the man page
+  and the desktop file.
+- `scripts/build-check.sh` compiles the working tree in a temporary directory
+  without `config.h`.
+
+### Reproducible configuration
+
+`config.def.h` is the upstream reference and intentionally lags this fork's
+choices (for example its scratchpad keys are still `MOD+z`). The source of
+truth for this machine is `config.local.h`.
+
+Edit `config.h` (the live file) as usual, then promote the change to the
+tracked template:
+
+    cp config.h config.local.h
+    git diff -- config.local.h
+
+On a fresh checkout:
+
+    make                # config.h missing -> copied from config.local.h
+    make clean && make
+
+`config.h` is never committed; do not add it to the repository.
+
+Key differences from upstream `config.def.h`: `MODKEY` is `LOGO`, `TERMINAL`
+is `footclient` (shared `foot --server`), the menu is `fuzzel`, only the tile
+layout is enabled, scratchpads use `MOD+Tab` / `MOD+Shift+Tab` instead of
+`MOD+z`, and the local `toggletabletmap`, `resizefloat` and `movestack`
+bindings are present. See `config.local.h` for the complete list.
+
+## Patch set
+
+Upstream base: `4ff9db2`, the fork point shared with `fork/main` (current
+`origin/main` is a few commits ahead at `4ecb2a9`). Everything listed below is
+local to this fork and is **not** in upstream dwl; the local patches are the 11
+commits in `4ff9db2..HEAD`.
+
+| Feature | Commits | Origin | Summary |
+| --- | --- | --- | --- |
+| dwl-ipc + close request | `244a87b`, `e815068`, `a7d6569` | Local, adapted from the somebar/raphi IPC patch set (not upstream) | `dwl-ipc-unstable-v2` manager v3, per-output status for waybar, `close` request and the `dwl-close` client |
+| Scratchpads | `2e18c8c`, `efa93c1`, `6b0af07` | Local, based on julmajustus' `simple_scratchpad` patch | Three slots, configurable centered size, slot selection, IPC-aware |
+| Window swallowing | `33f357d`, `e77d1a1` | Local | Hide a terminal when it spawns a GUI child and restore it afterwards |
+| Tablet support | `10dea62` | Local | Tablet v2 pad/buttons and runtime pen-to-window mapping (`toggletabletmap`) |
+| Float/stack helpers | `a6172d6`, `2e18c8c` | Local | `resizefloat`, `movestack`, `togglefocusfloat`; XWayland enabled in `config.mk` |
+| Reproducible build | this change | Local | `config.local.h`, `PKGBUILD`, `scripts/build-check.sh`, this documentation |
+
+### Window swallowing
+
+When a managed client maps, its PID is read and its `/proc` PPid ancestry is
+walked (up to `swallow_max_depth`). The first already-mapped ancestor whose
+app-id is in `swallow_allowlist` (currently `foot` and `footclient`) is hidden;
+the child inherits its monitor, tags and tiling slot. The Xwayland server PID
+is skipped so unrelated X11 clients are never treated as terminals. When the
+child unmaps or dies the parent is restored exactly, including its foreign
+toplevel handle. Swallowed parents are excluded from `VISIBLEON()` and from
+IPC client counts, and the IPC identifier is shown as `terminal->child`.
+
+- `swallow_enabled` is the master switch in `config.local.h`.
+- `MOD+Ctrl+X` (`toggleswallow`) breaks or re-arms the pairing for the focused
+  window; a manually suspended pair keeps its pairing so the toggle reverses.
+- Scratchpad toggles act on the visible child of a swallowed pair.
+
+### IPC close (`dwl-close`)
+
+The IPC patch exposes `zdwl_ipc_manager_v2`/`zdwl_ipc_output_v2` for status
+bars. Manager version 3 adds a `close` request; `dwl-close` connects to the
+running compositor, finds the manager and asks dwl to close the focused
+client. It is used by the waybar close button. `make` builds both `dwl` and
+`dwl-close`, and `make install` installs both.
+
+### Scratchpads
+
+`SCRATCHPAD_COUNT` (3) slots hold floating clients registered by app-id rules
+(`sp-math` maps to slot 0 in `config.local.h`). A shown scratchpad is centered
+and sized to `scratchpad_width_fraction` x `scratchpad_height_fraction` of the
+monitor, so it does not inherit the terminal's default size.
+
+- `MOD+Tab` (`togglescratchpad`) shows/hides the selected slot.
+- `MOD+Shift+Tab` (`addscratchpad`) moves the focused client into the slot.
+- `MOD+Alt+1` .. `MOD+Alt+3` (`setscratchpad`) select the active slot.
+  `MODKEY` is `LOGO` here, so `MOD+Alt` is used instead of the upstream
+  `MOD+z`-style binding to avoid colliding with `TAGKEYS`.
+- `removescratchpad` unbinds a client from its slot.
+
+The startup spawn for the `sp-math` scratchpad lives in `dwl-autostart` (outside
+this repository), not in dwl: spawning `footclient` before the shared
+`foot --server` socket exists makes it die at startup.
+
+### Tablet support
+
+Tablet pad buttons and stylus buttons are configurable through
+`tabletbuttons`/`tabletpadbuttons` in the configuration. `MOD+t`
+(`toggletabletmap`) switches at runtime between mapping the pen to the whole
+monitor and confining it to the focused window; `tablet_area` sets the active
+tablet region. The express-key binding used here also spawns the external
+`handwrite-input-client` overlay.
+
 ## Getting Started:
 
 ### Latest semi-stable [release]
@@ -38,8 +147,15 @@ dwl has the following dependencies:
 - wayland
 - wlroots (compiled with the libinput backend)
 - xkbcommon
+- pixman
 - wayland-protocols (compile-time only)
 - pkg-config (compile-time only)
+
+On Arch Linux the corresponding packages are `libinput`, `wayland`,
+`libxkbcommon`, `pixman`, `libxcb`, `xcb-util-wm` and `wlroots0.20`, with
+`pkgconf` and `wayland-protocols` as build dependencies. `fcft` is **not**
+used by dwl (it belongs to the status bar, not the compositor) and is not
+pulled in by the Makefile.
 
 dwl has the following additional dependencies if XWayland support is enabled:
 - libxcb
@@ -61,6 +177,11 @@ All configuration is done by editing `config.h` and recompiling, in the same
 manner as [dwm]. There is no way to separately restart the window manager in
 Wayland without restarting the entire display server, so any changes will take
 effect the next time dwl is executed.
+
+On this fork `config.h` is generated from the tracked `config.local.h` when it
+does not exist; edit `config.h` for the live machine and copy it back to
+`config.local.h` when the change should be reproducible (see
+[Reproducible configuration](#reproducible-configuration)).
 
 As in the [dwm] community, we encourage users to share patches they have
 created. Check out the [dwl-patches] repository!
@@ -129,6 +250,54 @@ For some Java AWT-based IDEs, such as Xilinx Vivado and Microchip MPLAB X, the
 following environment variable needs to be set before running the IDE or dwl:
 
     export _JAVA_AWT_WM_NONREPARENTING=1
+
+## Packaging and build checks
+
+### PKGBUILD
+
+`PKGBUILD` builds the checked-out `local/main` tree and installs `dwl`,
+`dwl-close`, `dwl.1` and `dwl.desktop` under `/usr`:
+
+    makepkg -si
+
+It has no remote sources, so it packages the current working tree (including
+uncommitted edits) and needs no network access. Run it from the repository
+root; the build generates `config.h` from the tracked `config.local.h` because
+the checkout does not contain one.
+
+The package dependencies are the pkg-config modules the Makefile actually
+queries:
+
+| pkg-config module | Arch package | Use |
+| --- | --- | --- |
+| `wlroots-0.20` | `wlroots0.20` | wlroots compositor library |
+| `wayland-server` | `wayland` | server API |
+| `xkbcommon` | `libxkbcommon` | keymaps |
+| `libinput` | `libinput` | input devices |
+| `pixman-1` | `pixman` | rendering library used by wlroots |
+| `xcb`, `xcb-icccm` | `libxcb`, `xcb-util-wm` | XWayland support (enabled in `config.mk`) |
+| `wayland-scanner` | `wayland` | protocol code generation |
+| `wayland-protocols` | `wayland-protocols` | protocol XML (build only) |
+| pkg-config | `pkgconf` | build only |
+
+### Build check
+
+    scripts/build-check.sh
+
+The script copies the tracked files plus other unignored source files (with
+uncommitted working-tree edits, but never the gitignored `config.h`) into a
+temporary directory, runs `make` there with the same toolchain, and verifies
+that `config.h` was generated from `config.local.h`. It never installs,
+restarts or modifies anything in the repository.
+
+The same check can run in a disposable Arch container without secrets or host
+state:
+
+    podman run --rm -v "$PWD:/src:ro" -w /src archlinux:base-devel sh -c '
+        pacman -Syu --noconfirm --needed git pkgconf wayland-protocols \
+            wayland libinput libxkbcommon pixman libxcb xcb-util-wm wlroots0.20 &&
+        git config --global --add safe.directory /src &&
+        scripts/build-check.sh'
 
 ## Replacements for X applications
 
